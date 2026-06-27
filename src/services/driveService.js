@@ -77,4 +77,21 @@ async function uploadReceiptImage(imageBuffer, customerName, filename) {
   return file.data.webViewLink ?? `https://drive.google.com/file/d/${file.data.id}/view`;
 }
 
-module.exports = { uploadReceiptImage };
+// Upload any file to the customer's personal folder
+async function uploadFile(buffer, customerName, filename, mimeType) {
+  const drive = await getDriveClient();
+  const rootId = await findOrCreateFolder(drive, ROOT_FOLDER_NAME);
+  const customerFolderId = await findOrCreateFolder(drive, customerName, rootId);
+
+  const stream = Readable.from(buffer);
+  const file = await drive.files.create({
+    requestBody: { name: filename, parents: [customerFolderId] },
+    media: { mimeType, body: stream },
+    fields: 'id, webViewLink',
+  });
+
+  // Only this customer can see it via link — we do NOT make it public
+  return file.data.webViewLink ?? `https://drive.google.com/file/d/${file.data.id}/view`;
+}
+
+module.exports = { uploadReceiptImage, uploadFile };

@@ -8,10 +8,10 @@ const {
   appendPayment, getYearSummaryForUser, getRecentPaymentsForUser,
   getCustomerName, saveCustomerName, updateCustomerName,
   getLastPaymentForUser, updatePaymentRow,
-  searchPaymentsForUser, getCustomerStats,
+  searchPaymentsForUser, getCustomerStats, generateUserCsv,
 } = require('../services/sheetsService');
 const { getUserProfile, getMessageImageBuffer } = require('../services/lineService');
-const { uploadReceiptImage } = require('../services/driveService');
+const { uploadReceiptImage, uploadFile } = require('../services/driveService');
 const { messagingApi } = require('@line/bot-sdk');
 
 const recentHashes = new Map(); // userId → Set<hash>
@@ -166,10 +166,33 @@ async function handlePostback(event) {
     }]);
   }
 
-  // ── Profile: Export Data ──
+  // ── Profile: Export Data (personal CSV only — no other customers' data) ──
   if (data === 'action=export_data') {
-    const sheetUrl = `https://docs.google.com/spreadsheets/d/${process.env.SPREADSHEET_ID}`;
-    return reply(replyToken, `📤 ดาวน์โหลดข้อมูลได้ที่ Google Sheets ค่ะ\n\n${sheetUrl}\n\nสามารถ export เป็น Excel หรือ CSV ได้จากเมนู File > Download ค่ะ`);
+    await reply(replyToken, '⏳ กำลังสร้างไฟล์ข้อมูลของคุณค่ะ...');
+    try {
+      const [name, csvBuffer] = await Promise.all([
+        getCustomerName(userId),
+        generateUserCsv(userId),
+      ]);
+      const displayName = name || 'customer';
+      const date = new Date().toISOString().slice(0, 10);
+      const filename = `${displayName}_รายการชำระ_${date}.csv`;
+      const fileUrl = await uploadFile(csvBuffer, displayName, filename, 'text/csv');
+
+      return getClient().pushMessage({
+        to: userId,
+        messages: [{
+          type: 'text',
+          text: `📤 ไฟล์ข้อมูลของคุณ${displayName} พร้อมแล้วค่ะ\n\n${fileUrl}\n\n✅ มีเฉพาะข้อมูลของคุณเท่านั้น\nเปิดใน Google Drive แล้ว Download → Excel/CSV ได้เลยค่ะ`,
+        }],
+      });
+    } catch (err) {
+      console.error('Export error:', err.message);
+      return getClient().pushMessage({
+        to: userId,
+        messages: [{ type: 'text', text: '❌ สร้างไฟล์ไม่สำเร็จค่ะ กรุณาลองใหม่' }],
+      });
+    }
   }
 }
 

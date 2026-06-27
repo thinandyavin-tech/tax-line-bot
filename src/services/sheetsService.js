@@ -271,6 +271,31 @@ async function getCustomerStats(userId) {
   return { count: yearPayments.length, total, firstSeen };
 }
 
+// ── Generate CSV of a user's own payments only ───────────────────────────────
+
+async function generateUserCsv(userId) {
+  const payments = await getPaymentsForUser(userId);
+
+  const headers = ['หมวดหมู่', 'จำนวนเงิน (THB)', 'วันที่', 'รายละเอียด', 'URL ใบเสร็จ', 'บันทึกเมื่อ'];
+  const escapeCell = v => {
+    const s = String(v ?? '');
+    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  const rows = payments.map(row => [
+    row[2] ?? '',   // category
+    row[3] ?? '',   // amount
+    row[4] ?? '',   // date
+    row[5] ?? '',   // description
+    row[7] ?? '',   // image URL
+    row[8] ?? '',   // recorded at
+  ].map(escapeCell).join(','));
+
+  // UTF-8 BOM so Excel opens Thai text correctly
+  const csv = '﻿' + [headers.join(','), ...rows].join('\r\n');
+  return Buffer.from(csv, 'utf8');
+}
+
 module.exports = {
   getCustomerName,
   saveCustomerName,
@@ -283,4 +308,5 @@ module.exports = {
   searchPaymentsForUser,
   getAllUserIds,
   getCustomerStats,
+  generateUserCsv,
 };
