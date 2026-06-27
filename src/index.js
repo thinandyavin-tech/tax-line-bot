@@ -62,6 +62,19 @@ app.get('/status', async (_req, res) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
+// Temporary PDF download endpoint — token expires after 1 hour
+app.get('/download/:token', (req, res) => {
+  const { getPdf } = require('./services/tempStorage');
+  const item = getPdf(req.params.token);
+  if (!item) {
+    return res.status(404).send('ไม่พบไฟล์หรือลิงก์หมดอายุแล้วค่ะ กรุณาขอ PDF ใหม่อีกครั้ง');
+  }
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(item.filename)}`);
+  res.setHeader('Content-Length', item.buffer.length);
+  res.send(item.buffer);
+});
+
 // Keep-alive: ping our own public URL every 14 min so Render free tier stays warm
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(() => {

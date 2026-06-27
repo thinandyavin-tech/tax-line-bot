@@ -12,8 +12,9 @@ const {
   getCustomerDob, saveCustomerDob, getPaymentsForUser,
 } = require('../services/sheetsService');
 const { getUserProfile, getMessageImageBuffer } = require('../services/lineService');
-const { uploadReceiptImage, uploadFile } = require('../services/driveService');
+const { uploadReceiptImage } = require('../services/driveService');
 const { generateUserPdf } = require('../services/pdfService');
+const { storePdf } = require('../services/tempStorage');
 const { getMessageFileBuffer } = require('../services/lineService');
 const { messagingApi } = require('@line/bot-sdk');
 
@@ -199,27 +200,29 @@ async function handlePostback(event) {
     await reply(replyToken, '⏳ กำลังสร้าง PDF ส่วนตัวของคุณค่ะ...');
     try {
       const displayName = name || 'customer';
-      const [payments, pdfBuffer] = await Promise.all([
-        getPaymentsForUser(userId),
-        Promise.resolve(null), // placeholder
-      ]);
+      const payments = await getPaymentsForUser(userId);
       const pdf = await generateUserPdf(displayName, payments, dob);
+
       const date = new Date().toISOString().slice(0, 10);
       const filename = `${displayName}_รายการชำระ_${date}.pdf`;
-      const fileUrl = await uploadFile(pdf, displayName, filename, 'application/pdf');
+      const token = storePdf(pdf, filename);
+
+      const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+      const downloadUrl = `${baseUrl}/download/${token}`;
 
       return getClient().pushMessage({
         to: userId,
         messages: [{
           type: 'text',
-          text: `📄 PDF ส่วนตัวของคุณ${displayName} พร้อมแล้วค่ะ\n\n${fileUrl}\n\n` +
+          text: `📄 PDF ส่วนตัวของคุณ${displayName} พร้อมแล้วค่ะ\n\n` +
+                `⬇️ ดาวน์โหลด (หมดอายุใน 1 ชั่วโมง):\n${downloadUrl}\n\n` +
                 `🔐 รหัสผ่าน: วันเดือนปีเกิดของคุณ (DDMMYYYY)\n` +
                 `   เช่น เกิดวันที่ 01/06/2000 → รหัส 01062000\n\n` +
                 `✅ ไฟล์นี้มีเฉพาะข้อมูลของคุณเท่านั้นค่ะ`,
         }],
       });
     } catch (err) {
-      console.error('PDF export error:', err.message);
+      console.error('PDF export error:', err.message, err.stack);
       return getClient().pushMessage({
         to: userId,
         messages: [{ type: 'text', text: '❌ สร้าง PDF ไม่สำเร็จค่ะ กรุณาลองใหม่' }],
