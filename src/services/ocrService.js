@@ -81,16 +81,35 @@ async function extractTextGroq(imageBuffer) {
 }
 
 // ── Parser: Groq text model extracts structured fields from raw text ──────────
-const PARSE_PROMPT = `คุณคือผู้เชี่ยวชาญอ่านใบเสร็จไทย
+const PARSE_PROMPT = `คุณคือผู้เชี่ยวชาญอ่านใบเสร็จและ statement ไทย
 
-จากข้อความดิบ ให้ดึงข้อมูลต่อไปนี้:
-1. "amount" — ยอดเงินสุดท้าย (ไม่ใช่ subtotal) ให้เป็นตัวเลขล้วน ไม่มี comma (เช่น 1500 ไม่ใช่ "1,500")
-2. "date" — วันที่ในรูป YYYY-MM-DD (แปลง พ.ศ.→ค.ศ. โดยลบ 543)
-3. "description" — ชื่อร้าน/ประเภทการชำระ/ภาษีอะไร
-4. "payerName" — ชื่อผู้ชำระ (จาก "จาก:", "ชื่อผู้โอน:", "ลูกค้า:", "From:" ถ้ามี)
+จากข้อความดิบ ให้ดึงข้อมูลต่อไปนี้ครบถ้วน:
+1. "amount"        — ยอดรวมสุดท้ายที่ต้องจ่าย (Grand Total) ตัวเลขล้วน ไม่มี comma
+2. "subtotal"      — ยอดก่อน VAT ถ้ามี (ตัวเลขล้วน) ถ้าไม่มีให้ส่ง null
+3. "vatAmount"     — จำนวน VAT ถ้าระบุแยก (ตัวเลขล้วน) ถ้าไม่มีให้ส่ง null
+4. "vatRate"       — อัตรา VAT เช่น 7 (ตัวเลขล้วน %) ถ้าไม่มีให้ส่ง null
+5. "date"          — วันที่ YYYY-MM-DD (แปลง พ.ศ.→ค.ศ. ลบ 543) ถ้าไม่พบให้ส่ง null
+6. "merchant"      — ชื่อร้าน/บริษัท/หน่วยงานที่รับเงิน
+7. "description"   — ประเภทการชำระ/รายการสินค้าหลัก เช่น "ค่า VAT", "ค่าเช่า", "อาหาร"
+8. "payerName"     — ชื่อผู้ชำระ (จาก "จาก:", "ผู้โอน:", "ลูกค้า:", "From:", "Payer:") ถ้าไม่มีให้ส่ง null
+9. "receiptNo"     — เลขที่ใบเสร็จ/reference number ถ้ามี ถ้าไม่มีให้ส่ง null
+10. "paymentMethod" — วิธีชำระ เช่น "โอนเงิน", "เงินสด", "บัตรเครดิต", "QR Code" ถ้าไม่ระบุให้ส่ง null
 
 ส่งกลับ JSON เท่านั้น ไม่มีข้อความอื่น:
-{"amount":<number|null>,"date":"<YYYY-MM-DD|null>","description":"<string|null>","payerName":"<string|null>"}`;
+{"amount":<number|null>,"subtotal":<number|null>,"vatAmount":<number|null>,"vatRate":<number|null>,"date":"<YYYY-MM-DD|null>","merchant":"<string|null>","description":"<string|null>","payerName":"<string|null>","receiptNo":"<string|null>","paymentMethod":"<string|null>"}`;
+
+// Parse a bank statement PDF for multiple transactions
+const STATEMENT_PROMPT = `คุณคือผู้เชี่ยวชาญอ่าน Bank Statement / Statement ธนาคารไทย
+
+จากข้อความ statement ให้หาทุกรายการ "รายจ่าย" หรือ "เดบิต" (ไม่เอารายรับ) แล้วส่งคืนเป็น JSON array
+แต่ละรายการประกอบด้วย:
+- "date": "YYYY-MM-DD" (แปลง พ.ศ.→ค.ศ.)
+- "amount": ตัวเลขล้วน ไม่มี comma
+- "description": รายละเอียดรายการ
+- "balance": ยอดคงเหลือหลังรายการ (ถ้ามี)
+
+ส่งกลับ JSON เท่านั้น: {"transactions":[{"date":"...","amount":...,"description":"...","balance":...},...]}
+ถ้าไม่พบรายการให้ส่ง {"transactions":[]}`;
 
 async function parseStructured(rawText) {
   const response = await groq.chat.completions.create({
@@ -99,11 +118,26 @@ async function parseStructured(rawText) {
       { role: 'system', content: PARSE_PROMPT },
       { role: 'user', content: rawText },
     ],
-    max_tokens: 300,
+    max_tokens: 500,
     temperature: 0,
     response_format: { type: 'json_object' },
   });
   return JSON.parse(response.choices[0].message.content.trim());
+}
+
+async function parseStatement(rawText) {
+  const response = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [
+      { role: 'system', content: STATEMENT_PROMPT },
+      { role: 'user', content: rawText },
+    ],
+    max_tokens: 2000,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+  });
+  const parsed = JSON.parse(response.choices[0].message.content.trim());
+  return parsed.transactions ?? [];
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -127,4 +161,17 @@ async function extractReceiptData(imageBuffer) {
   return { ...structured, rawText, engine };
 }
 
-module.exports = { extractReceiptData };
+// ── Parse text from a PDF file (bank statement / receipt PDF) ────────────────
+async function extractPdfData(pdfBuffer) {
+  const pdfParse = require('pdf-parse');
+  const data = await pdfParse(pdfBuffer);
+  const rawText = data.text;
+  console.log(`[PDF] pages=${data.numpages}, chars=${rawText.length}`);
+  // Try single receipt first
+  const structured = await parseStructured(rawText);
+  // Also try statement parsing
+  const transactions = await parseStatement(rawText);
+  return { rawText, structured, transactions };
+}
+
+module.exports = { extractReceiptData, extractPdfData };

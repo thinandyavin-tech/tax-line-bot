@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 
-const { extractReceiptData } = require('../services/ocrService');
+const { extractReceiptData, extractPdfData } = require('../services/ocrService');
 const { askAssistant, clearHistory } = require('../services/accountingService');
 const { calculatePIT, EXPENSE_RULES } = require('../services/taxCalculator');
 const { buildYearSummaryFlex, buildTaxResultFlex, buildProfileFlex, buildSearchResultsFlex } = require('../services/flexService');
@@ -9,9 +9,12 @@ const {
   getCustomerName, saveCustomerName, updateCustomerName,
   getLastPaymentForUser, updatePaymentRow,
   searchPaymentsForUser, getCustomerStats, generateUserCsv,
+  getCustomerDob, saveCustomerDob, getPaymentsForUser,
 } = require('../services/sheetsService');
 const { getUserProfile, getMessageImageBuffer } = require('../services/lineService');
 const { uploadReceiptImage, uploadFile } = require('../services/driveService');
+const { generateUserPdf } = require('../services/pdfService');
+const { getMessageFileBuffer } = require('../services/lineService');
 const { messagingApi } = require('@line/bot-sdk');
 
 const recentHashes = new Map(); // userId → Set<hash>
@@ -33,6 +36,18 @@ function fmt(n) { return Number(n).toLocaleString('th-TH'); }
 
 function categoryQR() {
   return { items: CATEGORIES.map(cat => ({ type: 'action', action: { type: 'message', label: cat, text: `หมวดหมู่: ${cat}` } })) };
+}
+
+// Parse DOB input → normalize to DDMMYYYY (CE year), return null if invalid
+function parseDob(input) {
+  const clean = input.replace(/[\s\-\/\.]/g, '');
+  if (!/^\d{8}$/.test(clean)) return null;
+  const d = parseInt(clean.slice(0, 2));
+  const m = parseInt(clean.slice(2, 4));
+  let y = parseInt(clean.slice(4, 8));
+  if (y > 2400) y -= 543; // convert Buddhist Era → CE
+  if (d < 1 || d > 31 || m < 1 || m > 12 || y < 1900 || y > new Date().getFullYear()) return null;
+  return String(d).padStart(2, '0') + String(m).padStart(2, '0') + String(y);
 }
 
 function autoCategory(description) {
@@ -166,31 +181,48 @@ async function handlePostback(event) {
     }]);
   }
 
-  // ── Profile: Export Data (personal CSV only — no other customers' data) ──
+  // ── Profile: Export Data — password-protected PDF (only this user's data) ──
   if (data === 'action=export_data') {
-    await reply(replyToken, '⏳ กำลังสร้างไฟล์ข้อมูลของคุณค่ะ...');
+    const [name, dob] = await Promise.all([getCustomerName(userId), getCustomerDob(userId)]);
+
+    // If no DOB set yet, ask for it first (needed for PDF password)
+    if (!dob) {
+      userStates.set(userId, { state: 'awaiting_dob_for_export' });
+      return reply(replyToken,
+        `🔐 ก่อนสร้าง PDF ต้องตั้งรหัสผ่านก่อนค่ะ\n` +
+        `กรุณาพิมพ์วันเดือนปีเกิดของคุณ (ค.ศ. หรือ พ.ศ.)\n` +
+        `รูปแบบ: วว/ดด/ปปปป เช่น 01/06/2000\n\n` +
+        `⚠️ วันเกิดนี้จะเป็นรหัสผ่าน PDF ของคุณ — จำไว้ด้วยนะคะ`
+      );
+    }
+
+    await reply(replyToken, '⏳ กำลังสร้าง PDF ส่วนตัวของคุณค่ะ...');
     try {
-      const [name, csvBuffer] = await Promise.all([
-        getCustomerName(userId),
-        generateUserCsv(userId),
-      ]);
       const displayName = name || 'customer';
+      const [payments, pdfBuffer] = await Promise.all([
+        getPaymentsForUser(userId),
+        Promise.resolve(null), // placeholder
+      ]);
+      const pdf = await generateUserPdf(displayName, payments, dob);
       const date = new Date().toISOString().slice(0, 10);
-      const filename = `${displayName}_รายการชำระ_${date}.csv`;
-      const fileUrl = await uploadFile(csvBuffer, displayName, filename, 'text/csv');
+      const filename = `${displayName}_รายการชำระ_${date}.pdf`;
+      const fileUrl = await uploadFile(pdf, displayName, filename, 'application/pdf');
 
       return getClient().pushMessage({
         to: userId,
         messages: [{
           type: 'text',
-          text: `📤 ไฟล์ข้อมูลของคุณ${displayName} พร้อมแล้วค่ะ\n\n${fileUrl}\n\n✅ มีเฉพาะข้อมูลของคุณเท่านั้น\nเปิดใน Google Drive แล้ว Download → Excel/CSV ได้เลยค่ะ`,
+          text: `📄 PDF ส่วนตัวของคุณ${displayName} พร้อมแล้วค่ะ\n\n${fileUrl}\n\n` +
+                `🔐 รหัสผ่าน: วันเดือนปีเกิดของคุณ (DDMMYYYY)\n` +
+                `   เช่น เกิดวันที่ 01/06/2000 → รหัส 01062000\n\n` +
+                `✅ ไฟล์นี้มีเฉพาะข้อมูลของคุณเท่านั้นค่ะ`,
         }],
       });
     } catch (err) {
-      console.error('Export error:', err.message);
+      console.error('PDF export error:', err.message);
       return getClient().pushMessage({
         to: userId,
-        messages: [{ type: 'text', text: '❌ สร้างไฟล์ไม่สำเร็จค่ะ กรุณาลองใหม่' }],
+        messages: [{ type: 'text', text: '❌ สร้าง PDF ไม่สำเร็จค่ะ กรุณาลองใหม่' }],
       });
     }
   }
@@ -252,7 +284,28 @@ async function handleImage(event) {
     await appendPayment({ userId, customerName: displayName, category, amount: data.amount, date: data.date, description: data.description, rawText: data.rawText, imageUrl });
 
     const imgNote = imageUrl ? '\n🖼 รูปบันทึกใน Drive แล้ว' : '';
-    await reply(replyToken, `✅ รูปที่ ${batchCount} บันทึกแล้วค่ะ\n💰 ฿${fmt(data.amount)}  📅 ${data.date || '❓'}\n📂 ${category}  👤 ${displayName}${imgNote}\n\n📎 ส่งรูปถัดไปได้เลย หรือพิมพ์ "เสร็จ"`);
+
+    // Build detailed confirmation
+    let detail = `✅ รูปที่ ${batchCount} บันทึกแล้วค่ะ\n`;
+    detail += `━━━━━━━━━━━━━━━━━━\n`;
+    detail += `💰 ยอดรวม: ฿${fmt(data.amount)}\n`;
+    if (data.subtotal != null && data.vatAmount != null) {
+      detail += `   ├ ก่อน VAT: ฿${fmt(data.subtotal)}\n`;
+      detail += `   └ VAT${data.vatRate ? ` ${data.vatRate}%` : ''}: ฿${fmt(data.vatAmount)}\n`;
+    }
+    detail += `📅 วันที่: ${data.date || '❓'}\n`;
+    if (data.merchant) detail += `🏪 ร้าน/บริษัท: ${data.merchant}\n`;
+    detail += `📋 รายการ: ${data.description || '❓'}\n`;
+    detail += `👤 ผู้ชำระ: ${displayName}\n`;
+    if (data.paymentMethod) detail += `💳 วิธีชำระ: ${data.paymentMethod}\n`;
+    if (data.receiptNo) detail += `🔢 เลขที่: ${data.receiptNo}\n`;
+    detail += `📂 หมวดหมู่: ${category}\n`;
+    detail += `🔍 อ่านด้วย: ${data.engine}`;
+    detail += `${imgNote}\n`;
+    detail += `━━━━━━━━━━━━━━━━━━\n`;
+    detail += `📎 ส่งรูปถัดไปได้เลย หรือพิมพ์ "เสร็จ"`;
+
+    await reply(replyToken, detail);
 
   } catch (err) {
     console.error('OCR error:', err.message);
@@ -304,8 +357,38 @@ async function handleTextMessage(event) {
   if (stateObj.state === 'awaiting_name') {
     const profile = await getUserProfile(userId);
     await saveCustomerName(userId, profile.displayName, text);
+    userStates.set(userId, { state: 'awaiting_dob' });
+    return reply(replyToken,
+      `✅ บันทึกชื่อ "${text}" แล้วค่ะ\n\n` +
+      `🔐 กรุณาพิมพ์วันเดือนปีเกิดของคุณค่ะ (ค.ศ. หรือ พ.ศ.)\n` +
+      `รูปแบบ: วว/ดด/ปปปป เช่น 01/06/2000\n\n` +
+      `⚠️ วันเกิดจะใช้เป็นรหัสผ่านสำหรับ PDF ของคุณ — จำไว้ด้วยนะคะ`
+    );
+  }
+
+  // ── State: awaiting_dob (onboarding step 2) ──
+  if (stateObj.state === 'awaiting_dob') {
+    const dob = parseDob(text);
+    if (!dob) return reply(replyToken, '❌ รูปแบบไม่ถูกต้องค่ะ กรุณาพิมพ์ เช่น 01/06/2000 หรือ 01062000');
+    await saveCustomerDob(userId, dob);
     userStates.set(userId, { state: 'awaiting_receipt', batchCount: 0 });
-    return reply(replyToken, `✅ บันทึกชื่อ "${text}" แล้วค่ะ\n\n📎 ส่งรูปใบเสร็จได้เลยค่ะ ส่งกี่ใบก็ได้\nพิมพ์ "เสร็จ" เมื่อส่งครบ`);
+    const name = await getCustomerName(userId);
+    return reply(replyToken,
+      `✅ ตั้งรหัสผ่าน PDF เรียบร้อยค่ะ!\n` +
+      `🔐 รหัสผ่าน PDF ของคุณคือ: วันเดือนปีเกิดในรูปแบบ DDMMYYYY\n` +
+      `   (เช่น วันเกิด 01/06/2000 → รหัส 01062000)\n\n` +
+      `📎 สวัสดีคุณ${name}! พร้อมส่งใบเสร็จแล้วค่ะ\nส่งกี่ใบก็ได้ พิมพ์ "เสร็จ" เมื่อส่งครบ`
+    );
+  }
+
+  // ── State: awaiting_dob_for_export (existing user setting DOB for first time) ──
+  if (stateObj.state === 'awaiting_dob_for_export') {
+    const dob = parseDob(text);
+    if (!dob) return reply(replyToken, '❌ รูปแบบไม่ถูกต้องค่ะ กรุณาพิมพ์ เช่น 01/06/2000');
+    await saveCustomerDob(userId, dob);
+    userStates.delete(userId);
+    // Now generate the PDF immediately
+    return handlePostback({ replyToken, source, postback: { data: 'action=export_data' } });
   }
 
   // ── State: awaiting_new_name (change name) ──
@@ -469,11 +552,104 @@ async function saveConfirmedReceipt(userId, category, pendingReceipt, replyToken
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+async function handlePdfFile(event) {
+  const { replyToken, source, message } = event;
+  const userId = source.userId;
+  const stateObj = userStates.get(userId) ?? {};
+
+  if (!['awaiting_receipt', 'awaiting_confirm', 'fix_amount', 'fix_date', 'awaiting_custom_category'].includes(stateObj.state)) {
+    return reply(replyToken, 'กดปุ่ม "ส่งใบเสร็จ" ก่อนส่งไฟล์นะคะ');
+  }
+
+  await reply(replyToken, '📄 ได้รับไฟล์ PDF แล้วค่ะ กำลังอ่านรายการ...');
+
+  try {
+    const [fileBuffer, customerName] = await Promise.all([
+      getMessageFileBuffer(message.id),
+      getCustomerName(userId),
+    ]);
+
+    const { rawText, structured, transactions } = await extractPdfData(fileBuffer);
+
+    // Bank statement with multiple transactions
+    if (transactions.length > 1) {
+      let saved = 0;
+      for (const tx of transactions) {
+        if (!tx.amount) continue;
+        const category = autoCategory(tx.description);
+        await appendPayment({
+          userId,
+          customerName: customerName || 'ลูกค้า',
+          category,
+          amount: tx.amount,
+          date: tx.date,
+          description: tx.description,
+          rawText: rawText.slice(0, 500),
+          imageUrl: null,
+        });
+        saved++;
+      }
+      const total = transactions.reduce((s, t) => s + (t.amount || 0), 0);
+      return getClient().pushMessage({
+        to: userId,
+        messages: [{
+          type: 'text',
+          text: `✅ อ่าน Statement สำเร็จค่ะ!\n` +
+                `📄 พบรายการ: ${transactions.length} รายการ\n` +
+                `💾 บันทึกสำเร็จ: ${saved} รายการ\n` +
+                `💰 ยอดรวม: ฿${fmt(total)}\n\n` +
+                `ดูสรุปได้ที่ปุ่ม "สรุปรายปี" ค่ะ`,
+        }],
+      });
+    }
+
+    // Single receipt PDF
+    if (structured.amount) {
+      const category = autoCategory(structured.description);
+      await appendPayment({
+        userId,
+        customerName: customerName || 'ลูกค้า',
+        category,
+        amount: structured.amount,
+        date: structured.date,
+        description: structured.description,
+        rawText: rawText.slice(0, 500),
+        imageUrl: null,
+      });
+      return getClient().pushMessage({
+        to: userId,
+        messages: [{
+          type: 'text',
+          text: `✅ อ่าน PDF สำเร็จค่ะ!\n` +
+                `💰 ยอดรวม: ฿${fmt(structured.amount)}\n` +
+                `📅 วันที่: ${structured.date || '❓'}\n` +
+                `🏪 ร้าน/รายการ: ${structured.merchant || structured.description || '❓'}\n` +
+                `📂 หมวดหมู่: ${category}\n\n` +
+                `📎 ส่งไฟล์ถัดไปได้เลย หรือพิมพ์ "เสร็จ"`,
+        }],
+      });
+    }
+
+    return getClient().pushMessage({
+      to: userId,
+      messages: [{ type: 'text', text: `❓ อ่านไฟล์ PDF ได้ แต่ไม่พบรายการชำระเงินค่ะ\nข้อความในไฟล์:\n${rawText.slice(0, 300)}` }],
+    });
+
+  } catch (err) {
+    console.error('PDF file error:', err.message);
+    return getClient().pushMessage({
+      to: userId,
+      messages: [{ type: 'text', text: '❌ อ่าน PDF ไม่สำเร็จค่ะ ไฟล์อาจถูกเข้ารหัสหรือเสียหาย' }],
+    });
+  }
+}
+
 async function handleEvent(event) {
   try {
     if (event.type === 'postback') return handlePostback(event);
     if (event.type === 'message' && event.message.type === 'image') return handleImage(event);
     if (event.type === 'message' && event.message.type === 'text') return handleTextMessage(event);
+    if (event.type === 'message' && event.message.type === 'file') return handlePdfFile(event);
     if (event.type === 'follow') {
       const profile = await getUserProfile(event.source.userId).catch(() => ({ displayName: 'คุณ' }));
       return reply(event.replyToken,

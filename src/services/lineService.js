@@ -47,4 +47,9 @@ async function replyMessages(replyToken, messages) {
   return getClient().replyMessage({ replyToken, messages });
 }
 
-module.exports = { getUserProfile, getMessageImageBuffer, replyText, replyMessages };
+// Works for both image and file message types — same endpoint
+async function getMessageFileBuffer(messageId) {
+  return getMessageImageBuffer(messageId);
+}
+
+module.exports = { getUserProfile, getMessageImageBuffer, getMessageFileBuffer, replyText, replyMessages };

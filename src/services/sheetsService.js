@@ -5,7 +5,7 @@ const PAYMENTS_SHEET = 'Payments';
 const CUSTOMERS_SHEET = 'Customers';
 
 const PAYMENT_HEADERS = ['LINE User ID', 'Customer Name', 'Category', 'Amount (THB)', 'Payment Date', 'Description', 'Raw OCR Text', 'Receipt Image URL', 'Recorded At'];
-const CUSTOMER_HEADERS = ['LINE User ID', 'LINE Display Name', 'Registered Name', 'First Seen'];
+const CUSTOMER_HEADERS = ['LINE User ID', 'LINE Display Name', 'Registered Name', 'First Seen', 'Date of Birth (DDMMYYYY)'];
 
 function getAuth() {
   if (process.env.GOOGLE_CREDENTIALS_JSON) {
@@ -147,6 +147,36 @@ async function getYearSummaryForUser(userId, year) {
 async function getRecentPaymentsForUser(userId, limit = 10) {
   const payments = await getPaymentsForUser(userId);
   return payments.slice(-limit).reverse();
+}
+
+// ── DOB (used as PDF password) ────────────────────────────────────────────────
+
+async function getCustomerDob(userId) {
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${CUSTOMERS_SHEET}!A:E`,
+  });
+  const rows = res.data.values ?? [];
+  const row = rows.slice(1).find(r => r[0] === userId);
+  return row?.[4] ?? null; // column E
+}
+
+async function saveCustomerDob(userId, dob) {
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${CUSTOMERS_SHEET}!A:A`,
+  });
+  const rows = res.data.values ?? [];
+  const idx = rows.findIndex((r, i) => i > 0 && r[0] === userId);
+  if (idx === -1) return;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${CUSTOMERS_SHEET}!E${idx + 1}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[dob]] },
+  });
 }
 
 // ── Update customer name ─────────────────────────────────────────────────────
@@ -301,6 +331,7 @@ module.exports = {
   saveCustomerName,
   updateCustomerName,
   appendPayment,
+  getPaymentsForUser,
   getYearSummaryForUser,
   getRecentPaymentsForUser,
   getLastPaymentForUser,
@@ -309,4 +340,6 @@ module.exports = {
   getAllUserIds,
   getCustomerStats,
   generateUserCsv,
+  getCustomerDob,
+  saveCustomerDob,
 };
