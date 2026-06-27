@@ -1,9 +1,14 @@
+const crypto = require('crypto');
+
 const { extractReceiptData } = require('../services/ocrService');
 const { askAssistant, clearHistory } = require('../services/accountingService');
 const { appendPayment, getYearSummaryForUser, getRecentPaymentsForUser, getCustomerName, saveCustomerName } = require('../services/sheetsService');
 const { getUserProfile, getMessageImageBuffer } = require('../services/lineService');
 const { uploadReceiptImage } = require('../services/driveService');
 const { messagingApi } = require('@line/bot-sdk');
+
+// Track image hashes per user to detect duplicates (cleared after 24h)
+const recentHashes = new Map(); // userId → Set of hashes
 
 // userStates stores rich state objects per userId
 // { state, pendingReceipt: { data, imageBuffer, messageId } }
@@ -50,8 +55,8 @@ async function handlePostback(event) {
       return reply(replyToken, '👋 กรุณาแจ้งชื่อ-นามสกุลของคุณก่อนนะคะ\n(เพื่อจัดเก็บข้อมูลให้ถูกต้อง)');
     }
 
-    userStates.set(userId, { state: 'awaiting_receipt' });
-    return reply(replyToken, `📎 สวัสดีคุณ${customerName}!\nกรุณาส่งรูปภาพใบเสร็จหรือใบแจ้งยอดการชำระเงิน`);
+    userStates.set(userId, { state: 'awaiting_receipt', batchCount: 0 });
+    return reply(replyToken, `📎 สวัสดีคุณ${customerName}!\nส่งรูปใบเสร็จได้เลยค่ะ ส่งกี่รูปก็ได้\nพิมพ์ "เสร็จ" เมื่อส่งครบค่ะ`);
   }
 
   if (data === 'action=year_summary') {
@@ -88,48 +93,99 @@ async function handlePostback(event) {
   }
 }
 
-// ── Image message ────────────────────────────────────────────────────────────
+// ── Auto-detect category from receipt description ─────────────────────────────
+
+function autoCategory(description) {
+  const d = (description ?? '').toLowerCase();
+  if (/vat|มูลค่าเพิ่ม|ภ\.พ\./.test(d)) return 'VAT/ภาษีมูลค่าเพิ่ม';
+  if (/เงินได้|income tax|ภ\.ง\.ด/.test(d)) return 'ภาษีเงินได้';
+  if (/หัก ณ ที่จ่าย|withholding/.test(d)) return 'ภาษีหัก ณ ที่จ่าย';
+  if (/ค่าเช่า|rent/.test(d)) return 'ค่าเช่า';
+  if (/ไฟฟ้า|น้ำประปา|โทรศัพท์|internet|อินเตอร์เน็ต|utility/.test(d)) return 'ค่าสาธารณูปโภค';
+  return 'อื่นๆ';
+}
+
+// ── Image message — accepts unlimited photos in a row ─────────────────────────
 
 async function handleImage(event) {
   const { replyToken, source, message } = event;
   const userId = source.userId;
   const stateObj = userStates.get(userId) ?? {};
 
-  if (stateObj.state !== 'awaiting_receipt') {
-    return reply(replyToken, 'กรุณากดปุ่ม "ส่งใบเสร็จ" ก่อนส่งรูปภาพ');
+  // Accept images in receipt mode OR when confirming/fixing (still batch-friendly)
+  const receiptStates = ['awaiting_receipt', 'awaiting_confirm', 'fix_amount', 'fix_date', 'awaiting_custom_category'];
+  if (!receiptStates.includes(stateObj.state)) {
+    return reply(replyToken, [{
+      type: 'text',
+      text: 'กดปุ่ม "ส่งใบเสร็จ" ก่อนส่งรูปนะคะ',
+      quickReply: { items: [{ type: 'action', action: { type: 'message', label: '📎 ส่งใบเสร็จ', text: 'ส่งใบเสร็จ' } }] },
+    }]);
   }
 
-  try {
-    const imageBuffer = await getMessageImageBuffer(message.id);
-    const data = await extractReceiptData(imageBuffer);
+  // Count how many receipts this batch session
+  const batchCount = (stateObj.batchCount ?? 0) + 1;
 
-    userStates.set(userId, {
-      state: 'awaiting_confirm',
-      pendingReceipt: { data, imageBuffer, messageId: message.id },
+  // Stay in awaiting_receipt for the next photo
+  userStates.set(userId, { state: 'awaiting_receipt', batchCount });
+
+  try {
+    const [imageBuffer, customerName] = await Promise.all([
+      getMessageImageBuffer(message.id),
+      getCustomerName(userId),
+    ]);
+
+    // Duplicate detection — hash the image bytes
+    const hash = crypto.createHash('sha256').update(imageBuffer).digest('hex').slice(0, 16);
+    const userHashes = recentHashes.get(userId) ?? new Set();
+    if (userHashes.has(hash)) {
+      userStates.set(userId, { state: 'awaiting_receipt', batchCount: batchCount - 1 });
+      return reply(replyToken, [{
+        type: 'text',
+        text: `⚠️ รูปที่ ${batchCount} ดูเหมือนเป็นรูปซ้ำที่เคยส่งแล้วนะคะ\nไม่ได้บันทึกซ้ำค่ะ ส่งรูปถัดไปได้เลย`,
+      }]);
+    }
+    userHashes.add(hash);
+    recentHashes.set(userId, userHashes);
+    // Auto-clear hashes after 24h
+    setTimeout(() => { userHashes.delete(hash); }, 24 * 60 * 60 * 1000);
+
+    const data = await extractReceiptData(imageBuffer);
+    const category = autoCategory(data.description);
+    const displayName = data.payerName || customerName || 'ลูกค้า';
+
+    // Upload to Drive + save to Sheets in parallel
+    let imageUrl = null;
+    try {
+      const safeDate = data.date || new Date().toISOString().slice(0, 10);
+      const safeAmt = data.amount ? `${data.amount}THB` : 'unknown';
+      const filename = `${displayName}_${safeDate}_${safeAmt}_${message.id.slice(-6)}.jpg`;
+      imageUrl = await uploadReceiptImage(imageBuffer, displayName, filename);
+    } catch (e) { console.error('Drive upload:', e.message); }
+
+    await appendPayment({
+      userId,
+      customerName: displayName,
+      category,
+      amount: data.amount,
+      date: data.date,
+      description: data.description,
+      rawText: data.rawText,
+      imageUrl,
     });
 
-    const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : '❓ ไม่พบ';
-    const dateStr = data.date || '❓ ไม่พบ';
-    const descStr = data.description || '❓ ไม่พบ';
+    const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : '❓';
+    const dateStr = data.date || '❓';
+    const imgNote = imageUrl ? '\n🖼 รูปบันทึกใน Drive แล้ว' : '';
 
-    await reply(replyToken, [
-      {
-        type: 'text',
-        text: `📋 อ่านใบเสร็จได้ดังนี้:\n\n💰 จำนวน: ${amountStr}\n📅 วันที่: ${dateStr}\n📝 รายละเอียด: ${descStr}\n\n─────────────\nข้อมูลถูกต้องไหม?`,
-        quickReply: {
-          items: [
-            { type: 'action', action: { type: 'message', label: '✅ ถูกต้อง', text: 'ยืนยัน: ถูกต้อง' } },
-            { type: 'action', action: { type: 'message', label: '✏️ แก้จำนวนเงิน', text: 'แก้ไข: จำนวน' } },
-            { type: 'action', action: { type: 'message', label: '✏️ แก้วันที่', text: 'แก้ไข: วันที่' } },
-            { type: 'action', action: { type: 'message', label: '🔄 ส่งรูปใหม่', text: 'ยกเลิก: ส่งใหม่' } },
-          ],
-        },
-      },
-    ]);
+    await reply(replyToken, [{
+      type: 'text',
+      text: `✅ รูปที่ ${batchCount} บันทึกแล้วค่ะ\n💰 ${amountStr}  📅 ${dateStr}\n📂 ${category}  👤 ${displayName}${imgNote}\n\n📎 ส่งรูปถัดไปได้เลยค่ะ\nหรือพิมพ์ "เสร็จ" เพื่อดูสรุป`,
+    }]);
+
   } catch (err) {
     console.error('OCR error:', err.message);
-    userStates.set(userId, { state: 'awaiting_receipt' });
-    await reply(replyToken, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น ถ่ายให้ตรง แสงพอ และไม่สั่น');
+    userStates.set(userId, { state: 'awaiting_receipt', batchCount: batchCount - 1 });
+    await reply(replyToken, `❌ รูปที่ ${batchCount} อ่านไม่ได้ค่ะ กรุณาถ่ายใหม่ให้ชัดขึ้น แสงพอ ไม่สั่น\n\nส่งรูปถัดไปหรือรูปเดิมใหม่ได้เลยค่ะ`);
   }
 }
 
@@ -145,7 +201,28 @@ async function handleTextMessage(event) {
   if (text === 'รีเซ็ต' || text.toLowerCase() === 'reset') {
     userStates.delete(userId);
     clearHistory(userId);
-    return reply(replyToken, '🔄 รีเซ็ตแล้ว');
+    return reply(replyToken, '🔄 รีเซ็ตแล้วค่ะ');
+  }
+
+  // "เสร็จ" — end batch session, show summary
+  if ((text === 'เสร็จ' || text === 'จบ') && (stateObj.batchCount ?? 0) > 0) {
+    const count = stateObj.batchCount;
+    userStates.delete(userId);
+    const year = new Date().getFullYear();
+    const summary = await getYearSummaryForUser(userId, year).catch(() => null);
+    const totalStr = summary ? `฿${formatAmount(summary.total)}` : '-';
+    return reply(replyToken, `🎉 บันทึกครบแล้วค่ะ!\n\nบันทึกไปทั้งหมด ${count} รูป\nยอดรวมทั้งปี ${year + 543}: ${totalStr}\n\nดูรายละเอียดได้ที่ Google Sheets หรือกด "สรุปรายปี" ค่ะ`);
+  }
+
+  // "ส่งใบเสร็จ" typed → same as button
+  if (text === 'ส่งใบเสร็จ') {
+    const customerName = await getCustomerName(userId);
+    if (!customerName) {
+      userStates.set(userId, { state: 'awaiting_name' });
+      return reply(replyToken, '👋 กรุณาแจ้งชื่อ-นามสกุลก่อนนะคะ');
+    }
+    userStates.set(userId, { state: 'awaiting_receipt', batchCount: 0 });
+    return reply(replyToken, `📎 ส่งรูปใบเสร็จได้เลยค่ะ คุณ${customerName}\nส่งกี่รูปก็ได้ พิมพ์ "เสร็จ" เมื่อส่งครบค่ะ`);
   }
 
   // ── State: waiting for customer name ──
