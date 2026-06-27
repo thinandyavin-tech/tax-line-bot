@@ -62,10 +62,11 @@ app.get('/status', async (_req, res) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
-// Keep-alive ping every 14 min so Render free tier doesn't spin down
+// Keep-alive: ping our own public URL every 14 min so Render free tier stays warm
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(() => {
-  const http = require('http');
-  http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
+  const mod = SELF_URL.startsWith('https') ? require('https') : require('http');
+  mod.get(`${SELF_URL}/health`, () => {}).on('error', () => {});
 }, 14 * 60 * 1000);
 
 app.listen(PORT, () => {
