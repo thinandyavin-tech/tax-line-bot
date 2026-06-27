@@ -1,0 +1,4 @@
+node_modules/
+.env
+google-service-account.json
+assets/rich-menu.png
