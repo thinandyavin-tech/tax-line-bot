@@ -21,10 +21,6 @@ async function reply(replyToken, messages) {
   return getClient().replyMessage({ replyToken, messages: msgs });
 }
 
-async function push(userId, messages) {
-  const msgs = Array.isArray(messages) ? messages : [{ type: 'text', text: messages }];
-  return getClient().pushMessage({ to: userId, messages: msgs });
-}
 
 function formatAmount(n) {
   return Number(n).toLocaleString('th-TH');
@@ -103,13 +99,10 @@ async function handleImage(event) {
     return reply(replyToken, 'กรุณากดปุ่ม "ส่งใบเสร็จ" ก่อนส่งรูปภาพ');
   }
 
-  await reply(replyToken, '⏳ กำลังอ่านใบเสร็จ กรุณารอสักครู่...');
-
   try {
     const imageBuffer = await getMessageImageBuffer(message.id);
     const data = await extractReceiptData(imageBuffer);
 
-    // Store pending receipt in state
     userStates.set(userId, {
       state: 'awaiting_category',
       pendingReceipt: { data, imageBuffer, messageId: message.id },
@@ -118,11 +111,12 @@ async function handleImage(event) {
     const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : 'ไม่พบจำนวนเงิน';
     const dateStr = data.date || 'ไม่พบวันที่';
     const descStr = data.description || 'ไม่พบรายละเอียด';
+    const rawPreview = data.rawText?.slice(0, 300) ?? '';
 
-    await push(userId, [
+    await reply(replyToken, [
       {
         type: 'text',
-        text: `📋 อ่านใบเสร็จได้ดังนี้:\n\n💰 จำนวน: ${amountStr}\n📅 วันที่: ${dateStr}\n📝 รายละเอียด: ${descStr}\n\n📄 ข้อความจากใบเสร็จ:\n"${data.rawText?.slice(0, 300)}${(data.rawText?.length ?? 0) > 300 ? '...' : ''}"`,
+        text: `📋 อ่านใบเสร็จได้ดังนี้:\n\n💰 จำนวน: ${amountStr}\n📅 วันที่: ${dateStr}\n📝 รายละเอียด: ${descStr}\n\n📄 ข้อความจากใบเสร็จ:\n"${rawPreview}${rawPreview.length === 300 ? '...' : ''}"`,
       },
       {
         type: 'text',
@@ -133,7 +127,7 @@ async function handleImage(event) {
   } catch (err) {
     console.error('OCR error:', err.message);
     userStates.set(userId, { state: 'awaiting_receipt' });
-    await push(userId, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น หรือถ่ายให้ตรงและสว่างกว่าเดิม');
+    await reply(replyToken, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น หรือถ่ายให้ตรงและสว่างกว่าเดิม');
   }
 }
 
@@ -210,12 +204,11 @@ async function handleTextMessage(event) {
 
   // ── Default: Thai accounting AI ──
   try {
-    await reply(replyToken, '🤔 กำลังค้นหา...');
     const answer = await askAccounting(userId, text);
-    await push(userId, answer);
+    await reply(replyToken, answer);
   } catch (err) {
     console.error('AI error:', err.message);
-    await push(userId, '❌ เกิดข้อผิดพลาด กรุณาลองใหม่');
+    await reply(replyToken, `❌ เกิดข้อผิดพลาด: ${err.message}\nกรุณาลองใหม่`);
   }
 }
 
@@ -228,8 +221,6 @@ async function saveReceipt(userId, category, pendingReceipt, replyToken) {
   const customerName = await getCustomerName(userId);
 
   let imageUrl = null;
-
-  // Upload image to Google Drive if we have it
   if (imageBuffer) {
     try {
       const safeDate = data.date || new Date().toISOString().slice(0, 10);
@@ -241,21 +232,12 @@ async function saveReceipt(userId, category, pendingReceipt, replyToken) {
     }
   }
 
-  await appendPayment({
-    userId,
-    customerName,
-    category,
-    amount: data.amount,
-    date: data.date,
-    description: data.description,
-    rawText: data.rawText,
-    imageUrl,
-  });
+  await appendPayment({ userId, customerName, category, amount: data.amount, date: data.date, description: data.description, rawText: data.rawText, imageUrl });
 
   const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : 'ไม่ระบุ';
   const imgNote = imageUrl ? `\n🖼 รูปภาพ: ${imageUrl}` : '';
 
-  await push(userId,
+  await reply(replyToken,
     `✅ บันทึกสำเร็จ!\n\n👤 ${customerName}\n📂 หมวด: ${category}\n💰 ${amountStr}\n📅 ${data.date || 'ไม่ระบุ'}\n📝 ${data.description || 'ไม่ระบุ'}${imgNote}`
   );
 }
