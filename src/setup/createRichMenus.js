@@ -82,7 +82,7 @@ const PROFILE_MENU = {
     { bounds: { x: 0,    y: 0,   width: CW,        height: CH  }, action: { type: 'postback', label: 'ข้อมูลของฉัน',   data: 'action=my_info',          displayText: 'ข้อมูลของฉัน' } },
     { bounds: { x: CW,   y: 0,   width: CW,        height: CH  }, action: { type: 'postback', label: 'เปลี่ยนชื่อ',    data: 'action=change_name',      displayText: 'เปลี่ยนชื่อ' } },
     { bounds: { x: CW*2, y: 0,   width: 2500-CW*2, height: CH  }, action: { type: 'postback', label: 'ค้นหาใบเสร็จ',  data: 'action=search_receipt',   displayText: 'ค้นหาใบเสร็จ' } },
-    { bounds: { x: 0,    y: CH,  width: CW,        height: 843-CH }, action: { type: 'postback', label: 'แก้ไขล่าสุด',   data: 'action=fix_last_receipt', displayText: 'แก้ไขรายการล่าสุด' } },
+    { bounds: { x: 0,    y: CH,  width: CW,        height: 843-CH }, action: { type: 'postback', label: 'จัดการรายการ', data: 'action=manage_data',      displayText: 'จัดการรายการ' } },
     { bounds: { x: CW,   y: CH,  width: CW,        height: 843-CH }, action: { type: 'postback', label: 'ส่งออกข้อมูล', data: 'action=export_data',      displayText: 'ส่งออกข้อมูล' } },
     {
       bounds: { x: CW*2, y: CH, width: 2500-CW*2, height: 843-CH },

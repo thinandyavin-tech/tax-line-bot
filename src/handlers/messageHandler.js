@@ -8,6 +8,7 @@ const {
   appendPayment, getYearSummaryForUser, getRecentPaymentsForUser,
   getCustomerName, saveCustomerName, updateCustomerName,
   getLastPaymentForUser, updatePaymentRow,
+  getRecentPaymentsWithRows, deletePaymentRow, deleteAllPaymentsForUser,
   searchPaymentsForUser, getCustomerStats, generateUserCsv,
   getCustomerDob, saveCustomerDob, getPaymentsForUser,
 } = require('../services/sheetsService');
@@ -179,6 +180,39 @@ async function handlePostback(event) {
         { type: 'action', action: { type: 'message', label: '📅 แก้วันที่', text: 'แก้วันที่' } },
         { type: 'action', action: { type: 'message', label: '📂 แก้หมวดหมู่', text: 'แก้หมวดหมู่' } },
       ]},
+    }]);
+  }
+
+  // ── Profile: Manage Data (delete individual / clear all) ──────────────────
+  if (data === 'action=manage_data') {
+    const recent = await getRecentPaymentsWithRows(userId, 5);
+    if (recent.length === 0) {
+      return reply(replyToken, 'ยังไม่มีรายการที่บันทึกไว้ค่ะ');
+    }
+
+    const lines = recent.map((r, i) => {
+      const d = r.data;
+      const amt = d[3] ? `฿${fmt(d[3])}` : '-';
+      return `${i + 1}. ${d[4] || '-'}  [${(d[2] || '-').slice(0, 14)}]  ${amt}`;
+    });
+
+    userStates.set(userId, { state: 'awaiting_manage_choice', recent });
+
+    const deleteItems = recent.map((_, i) => ({
+      type: 'action',
+      action: { type: 'message', label: `🗑 ลบ #${i + 1}`, text: `ลบ #${i + 1}` },
+    }));
+
+    return reply(replyToken, [{
+      type: 'text',
+      text: `📋 รายการล่าสุด ${recent.length} รายการค่ะ\n\n${lines.join('\n')}\n\nต้องการทำอะไรค่ะ?`,
+      quickReply: {
+        items: [
+          ...deleteItems,
+          { type: 'action', action: { type: 'message', label: '✏️ แก้ไขล่าสุด', text: 'แก้ไขล่าสุด' } },
+          { type: 'action', action: { type: 'message', label: '🗑 ลบทั้งหมด', text: 'ลบทั้งหมด' } },
+        ],
+      },
     }]);
   }
 
@@ -428,6 +462,82 @@ async function handleTextMessage(event) {
 
     userStates.set(userId, { state: 'awaiting_receipt', batchCount });
     return reply(replyToken, `✅ รูปที่ ${batchCount} บันทึกแล้วค่ะ\n💰 ฿${fmt(amount)}  📅 ${data.date || '❓'}\n📂 ${category}\n\n📎 ส่งรูปถัดไปได้เลย หรือพิมพ์ "เสร็จ"`);
+  }
+
+  // ── State: awaiting_manage_choice (manage / delete receipts) ──
+  if (stateObj.state === 'awaiting_manage_choice') {
+    const { recent } = stateObj;
+
+    // "ลบ #N"
+    const deleteMatch = text.match(/^ลบ #(\d+)$/);
+    if (deleteMatch) {
+      const idx = parseInt(deleteMatch[1]) - 1;
+      if (idx < 0 || idx >= recent.length) return reply(replyToken, '❌ ไม่พบรายการดังกล่าวค่ะ');
+      const target = recent[idx];
+      const d = target.data;
+      userStates.set(userId, { state: 'awaiting_delete_confirm', target });
+      return reply(replyToken, [{
+        type: 'text',
+        text: `⚠️ ยืนยันลบรายการนี้?\n📅 ${d[4] || '-'}  📂 ${d[2] || '-'}  💰 ${d[3] ? `฿${fmt(d[3])}` : '-'}\n📋 ${d[5] || '-'}`,
+        quickReply: {
+          items: [
+            { type: 'action', action: { type: 'message', label: '✅ ยืนยันลบ', text: 'ยืนยันลบ' } },
+            { type: 'action', action: { type: 'message', label: '❌ ยกเลิก', text: 'ยกเลิก' } },
+          ],
+        },
+      }]);
+    }
+
+    // "แก้ไขล่าสุด" → redirect to fix_last_receipt flow
+    if (text === 'แก้ไขล่าสุด') {
+      userStates.delete(userId);
+      return handlePostback({ replyToken, source, postback: { data: 'action=fix_last_receipt' } });
+    }
+
+    // "ลบทั้งหมด" → ask for confirmation
+    if (text === 'ลบทั้งหมด') {
+      userStates.set(userId, { state: 'awaiting_clear_confirm', totalCount: recent.length });
+      return reply(replyToken, [{
+        type: 'text',
+        text: `⚠️ คุณต้องการลบรายการ *ทั้งหมด* ของคุณใช่ไหมค่ะ?\n(การดำเนินการนี้ไม่สามารถย้อนกลับได้)\n\nพิมพ์ ยืนยันลบทั้งหมด เพื่อยืนยัน`,
+        quickReply: {
+          items: [
+            { type: 'action', action: { type: 'message', label: '🗑 ยืนยันลบทั้งหมด', text: 'ยืนยันลบทั้งหมด' } },
+            { type: 'action', action: { type: 'message', label: '❌ ยกเลิก', text: 'ยกเลิก' } },
+          ],
+        },
+      }]);
+    }
+
+    userStates.delete(userId);
+    return reply(replyToken, '↩️ ยกเลิกแล้วค่ะ');
+  }
+
+  // ── State: awaiting_delete_confirm (confirm single row delete) ──
+  if (stateObj.state === 'awaiting_delete_confirm') {
+    if (text === 'ยืนยันลบ') {
+      await deletePaymentRow(stateObj.target.sheetRow);
+      userStates.delete(userId);
+      const d = stateObj.target.data;
+      return reply(replyToken, `✅ ลบรายการ ${d[4] || ''} ${d[3] ? `฿${fmt(d[3])}` : ''} แล้วค่ะ`);
+    }
+    userStates.delete(userId);
+    return reply(replyToken, '↩️ ยกเลิกแล้วค่ะ ไม่มีการลบ');
+  }
+
+  // ── State: awaiting_clear_confirm (confirm delete all) ──
+  if (stateObj.state === 'awaiting_clear_confirm') {
+    if (text === 'ยืนยันลบทั้งหมด') {
+      await reply(replyToken, '⏳ กำลังลบข้อมูลทั้งหมด...');
+      const count = await deleteAllPaymentsForUser(userId);
+      userStates.delete(userId);
+      return getClient().pushMessage({
+        to: userId,
+        messages: [{ type: 'text', text: `✅ ลบข้อมูลทั้งหมด ${count} รายการแล้วค่ะ` }],
+      });
+    }
+    userStates.delete(userId);
+    return reply(replyToken, '↩️ ยกเลิกแล้วค่ะ ข้อมูลยังอยู่ครบ');
   }
 
   // ── State: awaiting_fix_choice (fix last receipt) ──

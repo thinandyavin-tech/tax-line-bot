@@ -62,7 +62,7 @@ async function generateProfileMenuImage() {
     { col: 0, row: 0, color: '#0277BD', label: 'ข้อมูลของฉัน', sub: 'My Info' },
     { col: 1, row: 0, color: '#AD1457', label: 'เปลี่ยนชื่อ',   sub: 'Change Name' },
     { col: 2, row: 0, color: '#E65100', label: 'ค้นหาใบเสร็จ', sub: 'Search' },
-    { col: 0, row: 1, color: '#33691E', label: 'แก้ไขล่าสุด',   sub: 'Fix Last' },
+    { col: 0, row: 1, color: '#BF360C', label: 'จัดการรายการ', sub: 'Manage' },
     { col: 1, row: 1, color: '#00695C', label: 'ส่งออกข้อมูล', sub: 'Export' },
     { col: 2, row: 1, color: '#37474F', label: '◀ กลับหลัก',   sub: 'Back' },
   ];

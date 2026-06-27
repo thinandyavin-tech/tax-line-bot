@@ -75,12 +75,12 @@ app.get('/download/:token', (req, res) => {
   res.send(item.buffer);
 });
 
-// Keep-alive: ping our own public URL every 14 min so Render free tier stays warm
+// Keep-alive: ping every 4 min — Render free tier sleeps after 15 min of silence
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 setInterval(() => {
   const mod = SELF_URL.startsWith('https') ? require('https') : require('http');
   mod.get(`${SELF_URL}/health`, () => {}).on('error', () => {});
-}, 14 * 60 * 1000);
+}, 4 * 60 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Tax LINE Bot running on port ${PORT}`);
