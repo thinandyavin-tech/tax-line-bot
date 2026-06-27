@@ -104,30 +104,32 @@ async function handleImage(event) {
     const data = await extractReceiptData(imageBuffer);
 
     userStates.set(userId, {
-      state: 'awaiting_category',
+      state: 'awaiting_confirm',
       pendingReceipt: { data, imageBuffer, messageId: message.id },
     });
 
-    const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : 'ไม่พบจำนวนเงิน';
-    const dateStr = data.date || 'ไม่พบวันที่';
-    const descStr = data.description || 'ไม่พบรายละเอียด';
-    const rawPreview = data.rawText?.slice(0, 300) ?? '';
+    const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : '❓ ไม่พบ';
+    const dateStr = data.date || '❓ ไม่พบ';
+    const descStr = data.description || '❓ ไม่พบ';
 
     await reply(replyToken, [
       {
         type: 'text',
-        text: `📋 อ่านใบเสร็จได้ดังนี้:\n\n💰 จำนวน: ${amountStr}\n📅 วันที่: ${dateStr}\n📝 รายละเอียด: ${descStr}\n\n📄 ข้อความจากใบเสร็จ:\n"${rawPreview}${rawPreview.length === 300 ? '...' : ''}"`,
-      },
-      {
-        type: 'text',
-        text: 'กรุณาเลือกหมวดหมู่การชำระ:',
-        quickReply: categoryQuickReply(),
+        text: `📋 อ่านใบเสร็จได้ดังนี้:\n\n💰 จำนวน: ${amountStr}\n📅 วันที่: ${dateStr}\n📝 รายละเอียด: ${descStr}\n\n─────────────\nข้อมูลถูกต้องไหม?`,
+        quickReply: {
+          items: [
+            { type: 'action', action: { type: 'message', label: '✅ ถูกต้อง', text: 'ยืนยัน: ถูกต้อง' } },
+            { type: 'action', action: { type: 'message', label: '✏️ แก้จำนวนเงิน', text: 'แก้ไข: จำนวน' } },
+            { type: 'action', action: { type: 'message', label: '✏️ แก้วันที่', text: 'แก้ไข: วันที่' } },
+            { type: 'action', action: { type: 'message', label: '🔄 ส่งรูปใหม่', text: 'ยกเลิก: ส่งใหม่' } },
+          ],
+        },
       },
     ]);
   } catch (err) {
     console.error('OCR error:', err.message);
     userStates.set(userId, { state: 'awaiting_receipt' });
-    await reply(replyToken, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น หรือถ่ายให้ตรงและสว่างกว่าเดิม');
+    await reply(replyToken, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น ถ่ายให้ตรง แสงพอ และไม่สั่น');
   }
 }
 
@@ -154,6 +156,63 @@ async function handleTextMessage(event) {
 
     userStates.set(userId, { state: 'awaiting_receipt' });
     return reply(replyToken, `✅ บันทึกชื่อ "${registeredName}" แล้วค่ะ\n\n📎 กรุณาส่งรูปภาพใบเสร็จได้เลย`);
+  }
+
+  // ── State: confirm OCR result ──
+  if (stateObj.state === 'awaiting_confirm') {
+    if (text === 'ยืนยัน: ถูกต้อง') {
+      userStates.set(userId, { ...stateObj, state: 'awaiting_category' });
+      return reply(replyToken, [{
+        type: 'text',
+        text: 'กรุณาเลือกหมวดหมู่:',
+        quickReply: categoryQuickReply(),
+      }]);
+    }
+    if (text === 'แก้ไข: จำนวน') {
+      userStates.set(userId, { ...stateObj, state: 'fix_amount' });
+      return reply(replyToken, `💰 จำนวนปัจจุบัน: ${stateObj.pendingReceipt.data.amount ?? 'ไม่พบ'}\nกรุณาพิมพ์จำนวนเงินที่ถูกต้อง (ตัวเลขเท่านั้น เช่น 2500):`);
+    }
+    if (text === 'แก้ไข: วันที่') {
+      userStates.set(userId, { ...stateObj, state: 'fix_date' });
+      return reply(replyToken, `📅 วันที่ปัจจุบัน: ${stateObj.pendingReceipt.data.date ?? 'ไม่พบ'}\nกรุณาพิมพ์วันที่ที่ถูกต้อง (รูปแบบ YYYY-MM-DD เช่น 2026-06-27):`);
+    }
+    if (text === 'ยกเลิก: ส่งใหม่') {
+      userStates.set(userId, { state: 'awaiting_receipt' });
+      return reply(replyToken, '🔄 กรุณาส่งรูปใบเสร็จใหม่อีกครั้ง');
+    }
+  }
+
+  // ── State: fix amount ──
+  if (stateObj.state === 'fix_amount') {
+    const amount = parseFloat(text.replace(/,/g, ''));
+    if (isNaN(amount)) return reply(replyToken, '❌ กรุณาพิมพ์ตัวเลขเท่านั้น เช่น 2500');
+    const updated = { ...stateObj, state: 'awaiting_confirm', pendingReceipt: { ...stateObj.pendingReceipt, data: { ...stateObj.pendingReceipt.data, amount } } };
+    userStates.set(userId, updated);
+    return reply(replyToken, [{
+      type: 'text',
+      text: `✅ แก้จำนวนเป็น ฿${formatAmount(amount)} แล้ว\n\n💰 จำนวน: ฿${formatAmount(amount)}\n📅 วันที่: ${updated.pendingReceipt.data.date ?? '❓'}\n📝 รายละเอียด: ${updated.pendingReceipt.data.description ?? '❓'}\n\nข้อมูลถูกต้องไหม?`,
+      quickReply: { items: [
+        { type: 'action', action: { type: 'message', label: '✅ ถูกต้อง', text: 'ยืนยัน: ถูกต้อง' } },
+        { type: 'action', action: { type: 'message', label: '✏️ แก้วันที่', text: 'แก้ไข: วันที่' } },
+        { type: 'action', action: { type: 'message', label: '🔄 ส่งรูปใหม่', text: 'ยกเลิก: ส่งใหม่' } },
+      ]},
+    }]);
+  }
+
+  // ── State: fix date ──
+  if (stateObj.state === 'fix_date') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return reply(replyToken, '❌ รูปแบบไม่ถูกต้อง กรุณาพิมพ์ เช่น 2026-06-27');
+    const updated = { ...stateObj, state: 'awaiting_confirm', pendingReceipt: { ...stateObj.pendingReceipt, data: { ...stateObj.pendingReceipt.data, date: text } } };
+    userStates.set(userId, updated);
+    return reply(replyToken, [{
+      type: 'text',
+      text: `✅ แก้วันที่เป็น ${text} แล้ว\n\n💰 จำนวน: ${updated.pendingReceipt.data.amount != null ? `฿${formatAmount(updated.pendingReceipt.data.amount)}` : '❓'}\n📅 วันที่: ${text}\n📝 รายละเอียด: ${updated.pendingReceipt.data.description ?? '❓'}\n\nข้อมูลถูกต้องไหม?`,
+      quickReply: { items: [
+        { type: 'action', action: { type: 'message', label: '✅ ถูกต้อง', text: 'ยืนยัน: ถูกต้อง' } },
+        { type: 'action', action: { type: 'message', label: '✏️ แก้จำนวนเงิน', text: 'แก้ไข: จำนวน' } },
+        { type: 'action', action: { type: 'message', label: '🔄 ส่งรูปใหม่', text: 'ยกเลิก: ส่งใหม่' } },
+      ]},
+    }]);
   }
 
   // ── State: waiting for category selection ──
