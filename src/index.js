@@ -71,4 +71,11 @@ setInterval(() => {
 
 app.listen(PORT, () => {
   console.log(`Tax LINE Bot running on port ${PORT}`);
+  // Start monthly deadline reminder cron jobs
+  try {
+    const { startReminders } = require('./services/reminderService');
+    startReminders();
+  } catch (err) {
+    console.error('[reminder] Failed to start:', err.message);
+  }
 });

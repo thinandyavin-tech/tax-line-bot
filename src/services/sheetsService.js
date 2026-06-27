@@ -149,4 +149,138 @@ async function getRecentPaymentsForUser(userId, limit = 10) {
   return payments.slice(-limit).reverse();
 }
 
-module.exports = { getCustomerName, saveCustomerName, appendPayment, getYearSummaryForUser, getRecentPaymentsForUser };
+// ── Update customer name ─────────────────────────────────────────────────────
+
+async function updateCustomerName(userId, newName) {
+  const sheets = await getSheetsClient();
+  await ensureSheet(sheets, CUSTOMERS_SHEET, CUSTOMER_HEADERS);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${CUSTOMERS_SHEET}!A:A`,
+  });
+
+  const rows = res.data.values ?? [];
+  const idx = rows.findIndex((r, i) => i > 0 && r[0] === userId);
+  if (idx === -1) return;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${CUSTOMERS_SHEET}!C${idx + 1}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[newName]] },
+  });
+}
+
+// ── Get last payment row (with sheet row index for updates) ──────────────────
+
+async function getLastPaymentForUser(userId) {
+  const sheets = await getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${PAYMENTS_SHEET}!A:I`,
+  });
+
+  const rows = res.data.values ?? [];
+  let lastSheetRow = -1;
+  let lastData = null;
+
+  rows.forEach((row, i) => {
+    if (i === 0) return;
+    if (row[0] === userId) { lastSheetRow = i + 1; lastData = row; }
+  });
+
+  if (!lastData) return null;
+  return { sheetRow: lastSheetRow, data: lastData };
+}
+
+// ── Update a specific payment row ────────────────────────────────────────────
+
+async function updatePaymentRow(sheetRow, updates) {
+  const sheets = await getSheetsClient();
+
+  // Fetch current row first
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${PAYMENTS_SHEET}!A${sheetRow}:I${sheetRow}`,
+  });
+
+  const current = (res.data.values?.[0] ?? []).concat(Array(9).fill(''));
+  if (updates.category !== undefined) current[2] = updates.category;
+  if (updates.amount !== undefined) current[3] = updates.amount;
+  if (updates.date !== undefined) current[4] = updates.date;
+  if (updates.description !== undefined) current[5] = updates.description;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: `${PAYMENTS_SHEET}!A${sheetRow}:I${sheetRow}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [current.slice(0, 9)] },
+  });
+}
+
+// ── Search payments by keyword ────────────────────────────────────────────────
+
+async function searchPaymentsForUser(userId, query) {
+  const payments = await getPaymentsForUser(userId);
+  const q = query.toLowerCase();
+  return payments
+    .filter(row =>
+      [row[2], row[4], row[5], row[6]].some(cell => (cell ?? '').toLowerCase().includes(q))
+    )
+    .slice(-10)
+    .reverse();
+}
+
+// ── Get all registered user IDs (for reminders) ──────────────────────────────
+
+async function getAllUserIds() {
+  try {
+    const sheets = await getSheetsClient();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `${CUSTOMERS_SHEET}!A:A`,
+    });
+    return (res.data.values ?? []).slice(1).map(r => r[0]).filter(Boolean);
+  } catch { return []; }
+}
+
+// ── Customer stats for profile card ─────────────────────────────────────────
+
+async function getCustomerStats(userId) {
+  const sheets = await getSheetsClient();
+  const year = new Date().getFullYear();
+
+  const [paymentsRes, custRes] = await Promise.all([
+    getPaymentsForUser(userId),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: process.env.SPREADSHEET_ID,
+      range: `${CUSTOMERS_SHEET}!A:D`,
+    }),
+  ]);
+
+  const yearPayments = paymentsRes.filter(r => (r[4] ?? '').startsWith(String(year)));
+  const total = yearPayments.reduce((s, r) => s + (parseFloat(r[3]) || 0), 0);
+
+  const custRows = custRes.data.values ?? [];
+  const custRow = custRows.slice(1).find(r => r[0] === userId);
+  const firstSeen = custRow?.[3]
+    ? new Date(custRow[3]).toLocaleDateString('th-TH', { year: 'numeric', month: 'short', day: 'numeric' })
+    : '-';
+
+  return { count: yearPayments.length, total, firstSeen };
+}
+
+module.exports = {
+  getCustomerName,
+  saveCustomerName,
+  updateCustomerName,
+  appendPayment,
+  getYearSummaryForUser,
+  getRecentPaymentsForUser,
+  getLastPaymentForUser,
+  updatePaymentRow,
+  searchPaymentsForUser,
+  getAllUserIds,
+  getCustomerStats,
+};

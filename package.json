@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "setup-menu": "node src/setup/createRichMenu.js"
+    "setup-menu": "node src/setup/createRichMenu.js",
+    "setup-menus": "node src/setup/createRichMenus.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
@@ -16,6 +17,7 @@
     "express": "^4.19.2",
     "googleapis": "^144.0.0",
     "groq-sdk": "^1.3.0",
+    "node-cron": "^3.0.3",
     "sharp": "^0.33.5"
   },
   "devDependencies": {
