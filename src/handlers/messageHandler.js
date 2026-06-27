@@ -1,5 +1,5 @@
 const { extractReceiptData } = require('../services/ocrService');
-const { askAccounting, clearHistory } = require('../services/accountingService');
+const { askAssistant, clearHistory } = require('../services/accountingService');
 const { appendPayment, getYearSummaryForUser, getRecentPaymentsForUser, getCustomerName, saveCustomerName } = require('../services/sheetsService');
 const { getUserProfile, getMessageImageBuffer } = require('../services/lineService');
 const { uploadReceiptImage } = require('../services/driveService');
@@ -261,9 +261,16 @@ async function handleTextMessage(event) {
     ]);
   }
 
-  // ── Default: Thai accounting AI ──
+  // ── Default: personal accounting assistant ──
   try {
-    const answer = await askAccounting(userId, text);
+    const year = new Date().getFullYear();
+    const [customerName, summary, recent] = await Promise.all([
+      getCustomerName(userId),
+      getYearSummaryForUser(userId, year).catch(() => null),
+      getRecentPaymentsForUser(userId, 5).catch(() => []),
+    ]);
+    const customerData = customerName ? { name: customerName, year, summary, recent } : null;
+    const answer = await askAssistant(userId, text, customerData);
     await reply(replyToken, answer);
   } catch (err) {
     console.error('AI error:', err.message);
@@ -311,7 +318,7 @@ async function handleEvent(event) {
     if (event.type === 'follow') {
       const profile = await getUserProfile(event.source.userId);
       return reply(event.replyToken,
-        `สวัสดีคุณ ${profile.displayName}! 🙏\n\nฉันคือ TaxBot ผู้ช่วยด้านภาษีและบัญชีไทย\n\n📎 กด "ส่งใบเสร็จ" เพื่อบันทึกการชำระเงิน\n📊 กด "สรุปรายปี" เพื่อดูยอดรวม\n💬 หรือพิมพ์ถามเรื่องภาษีได้เลย`
+        `สวัสดีค่ะ คุณ${profile.displayName}! 🙏\n\nหนูชื่อ "น้องบัญชี" ผู้ช่วยบัญชีส่วนตัวของคุณค่ะ\nพร้อมดูแลเรื่องภาษีและบัญชีให้คุณทุกอย่าง\n\n📎 ส่งใบเสร็จ — บันทึกรายการชำระเงิน\n📊 สรุปรายปี — ดูยอดรวมทั้งปี\n📋 ประวัติ — ดูรายการล่าสุด\n💬 หรือจะถามอะไรก็ได้เลยค่ะ เช่น\n   "ค่าลดหย่อนปีนี้มีอะไรบ้าง"\n   "ฉันควรจ่ายภาษีเท่าไหร่"\n   "สรุปรายการของฉันให้หน่อย"`
       );
     }
   } catch (err) {
