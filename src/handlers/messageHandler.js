@@ -1,26 +1,45 @@
 const { extractReceiptData } = require('../services/ocrService');
 const { askAccounting, clearHistory } = require('../services/accountingService');
-const { appendPayment, getYearSummaryForUser, getRecentPaymentsForUser } = require('../services/sheetsService');
-const { getUserProfile, getMessageImageBuffer, replyText } = require('../services/lineService');
+const { appendPayment, getYearSummaryForUser, getRecentPaymentsForUser, getCustomerName, saveCustomerName } = require('../services/sheetsService');
+const { getUserProfile, getMessageImageBuffer } = require('../services/lineService');
+const { uploadReceiptImage } = require('../services/driveService');
 const { messagingApi } = require('@line/bot-sdk');
 
+// userStates stores rich state objects per userId
+// { state, pendingReceipt: { data, imageBuffer, messageId } }
 const userStates = new Map();
 
+const CATEGORIES = ['ภาษีเงินได้', 'VAT/ภาษีมูลค่าเพิ่ม', 'ภาษีหัก ณ ที่จ่าย', 'ค่าสาธารณูปโภค', 'ค่าเช่า', 'อื่นๆ'];
 const THAI_MONTHS = ['', 'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 
-function pushClient() {
-  return new messagingApi.MessagingApiClient({
-    channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
-  });
+function getClient() {
+  return new messagingApi.MessagingApiClient({ channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN });
+}
+
+async function reply(replyToken, messages) {
+  const msgs = Array.isArray(messages) ? messages : [{ type: 'text', text: messages }];
+  return getClient().replyMessage({ replyToken, messages: msgs });
+}
+
+async function push(userId, messages) {
+  const msgs = Array.isArray(messages) ? messages : [{ type: 'text', text: messages }];
+  return getClient().pushMessage({ to: userId, messages: msgs });
 }
 
 function formatAmount(n) {
   return Number(n).toLocaleString('th-TH');
 }
 
-async function push(userId, text) {
-  return pushClient().pushMessage({ to: userId, messages: [{ type: 'text', text }] });
+function categoryQuickReply() {
+  return {
+    items: CATEGORIES.map(cat => ({
+      type: 'action',
+      action: { type: 'message', label: cat, text: `หมวดหมู่: ${cat}` },
+    })),
+  };
 }
+
+// ── Postback (rich menu button taps) ────────────────────────────────────────
 
 async function handlePostback(event) {
   const { replyToken, source, postback } = event;
@@ -28,14 +47,24 @@ async function handlePostback(event) {
   const data = postback.data;
 
   if (data === 'action=send_receipt') {
-    userStates.set(userId, 'awaiting_receipt');
-    return replyText(replyToken, '📎 กรุณาส่งรูปภาพใบเสร็จหรือใบแจ้งยอดการชำระเงินของคุณ\n\nPlease send a photo of your receipt or payment statement.');
+    const customerName = await getCustomerName(userId);
+
+    if (!customerName) {
+      userStates.set(userId, { state: 'awaiting_name' });
+      return reply(replyToken, '👋 กรุณาแจ้งชื่อ-นามสกุลของคุณก่อนนะคะ\n(เพื่อจัดเก็บข้อมูลให้ถูกต้อง)');
+    }
+
+    userStates.set(userId, { state: 'awaiting_receipt' });
+    return reply(replyToken, `📎 สวัสดีคุณ${customerName}!\nกรุณาส่งรูปภาพใบเสร็จหรือใบแจ้งยอดการชำระเงิน`);
   }
 
   if (data === 'action=year_summary') {
     const year = new Date().getFullYear();
-    const { total, byMonth, count } = await getYearSummaryForUser(userId, year);
-    if (count === 0) return replyText(replyToken, `ยังไม่มีข้อมูลการชำระในปี ${year + 543}\n\nNo payment records found for ${year}.`);
+    const { total, byCategory, byMonth, count } = await getYearSummaryForUser(userId, year);
+    if (count === 0) return reply(replyToken, `ยังไม่มีข้อมูลการชำระในปี ${year + 543}`);
+
+    const catLines = Object.entries(byCategory)
+      .map(([cat, amt]) => `  📂 ${cat}: ฿${formatAmount(amt)}`).join('\n');
 
     const monthLines = Object.entries(byMonth)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -44,88 +73,194 @@ async function handlePostback(event) {
         return `  ${THAI_MONTHS[m]}: ฿${formatAmount(amt)}`;
       }).join('\n');
 
-    return replyText(replyToken, `📊 สรุปการชำระปี ${year + 543} (${year})\n\n${monthLines}\n\n─────────────\n💰 รวมทั้งหมด: ฿${formatAmount(total)}\n(${count} รายการ)`);
+    return reply(replyToken, `📊 สรุปปี ${year + 543} (${year})\n\nตามหมวดหมู่:\n${catLines}\n\nตามเดือน:\n${monthLines}\n\n─────────────\n💰 รวม: ฿${formatAmount(total)} (${count} รายการ)`);
   }
 
   if (data === 'action=payment_history') {
     const recent = await getRecentPaymentsForUser(userId, 10);
-    if (recent.length === 0) return replyText(replyToken, 'ยังไม่มีประวัติการชำระเงิน\n\nNo payment history found.');
+    if (recent.length === 0) return reply(replyToken, 'ยังไม่มีประวัติการชำระเงิน');
 
     const lines = recent.map((row, i) => {
-      const amount = row[2] ? `฿${formatAmount(row[2])}` : '-';
-      const date = row[3] || '-';
-      const desc = row[4] || '-';
-      return `${i + 1}. ${date} — ${amount}\n   ${desc}`;
+      const amount = row[3] ? `฿${formatAmount(row[3])}` : '-';
+      const date = row[4] || '-';
+      const cat = row[2] || '-';
+      const desc = row[5] || '-';
+      return `${i + 1}. ${date} [${cat}]\n   ${amount} — ${desc}`;
     });
 
-    return replyText(replyToken, `📋 ประวัติการชำระล่าสุด\n\n${lines.join('\n\n')}`);
+    return reply(replyToken, `📋 ประวัติล่าสุด\n\n${lines.join('\n\n')}`);
   }
 }
+
+// ── Image message ────────────────────────────────────────────────────────────
 
 async function handleImage(event) {
   const { replyToken, source, message } = event;
   const userId = source.userId;
+  const stateObj = userStates.get(userId) ?? {};
 
-  if (userStates.get(userId) !== 'awaiting_receipt') {
-    return replyText(replyToken, 'กรุณากดปุ่ม "ส่งใบเสร็จ" ก่อนส่งรูปภาพ\n\nPlease tap "ส่งใบเสร็จ" first.');
+  if (stateObj.state !== 'awaiting_receipt') {
+    return reply(replyToken, 'กรุณากดปุ่ม "ส่งใบเสร็จ" ก่อนส่งรูปภาพ');
   }
 
-  userStates.delete(userId);
-  await replyText(replyToken, '⏳ กำลังอ่านใบเสร็จ... กรุณารอสักครู่');
+  await reply(replyToken, '⏳ กำลังอ่านใบเสร็จ กรุณารอสักครู่...');
 
   try {
     const imageBuffer = await getMessageImageBuffer(message.id);
     const data = await extractReceiptData(imageBuffer);
-    const profile = await getUserProfile(userId);
-    const displayName = data.payerName || profile.displayName;
 
-    await appendPayment({ userId, displayName, amount: data.amount, date: data.date, description: data.description, messageId: message.id });
+    // Store pending receipt in state
+    userStates.set(userId, {
+      state: 'awaiting_category',
+      pendingReceipt: { data, imageBuffer, messageId: message.id },
+    });
 
-    const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : 'ไม่ระบุ';
-    const dateStr = data.date || 'ไม่ระบุ';
-    const descStr = data.description || 'ไม่ระบุ';
+    const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : 'ไม่พบจำนวนเงิน';
+    const dateStr = data.date || 'ไม่พบวันที่';
+    const descStr = data.description || 'ไม่พบรายละเอียด';
 
-    await push(userId, `✅ บันทึกสำเร็จ!\n\n👤 ${displayName}\n💰 ${amountStr}\n📅 ${dateStr}\n📝 ${descStr}\n\nบันทึกลง Google Sheets แล้ว`);
+    await push(userId, [
+      {
+        type: 'text',
+        text: `📋 อ่านใบเสร็จได้ดังนี้:\n\n💰 จำนวน: ${amountStr}\n📅 วันที่: ${dateStr}\n📝 รายละเอียด: ${descStr}\n\n📄 ข้อความจากใบเสร็จ:\n"${data.rawText?.slice(0, 300)}${(data.rawText?.length ?? 0) > 300 ? '...' : ''}"`,
+      },
+      {
+        type: 'text',
+        text: 'กรุณาเลือกหมวดหมู่การชำระ:',
+        quickReply: categoryQuickReply(),
+      },
+    ]);
   } catch (err) {
-    console.error('Receipt error:', err.message);
-    userStates.set(userId, 'awaiting_receipt');
-    await push(userId, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น หรือพิมพ์:\n"ชำระ 2000 บาท 2026-06-27 ค่าภาษีเงินได้"');
+    console.error('OCR error:', err.message);
+    userStates.set(userId, { state: 'awaiting_receipt' });
+    await push(userId, '❌ อ่านใบเสร็จไม่ได้ กรุณาส่งรูปที่ชัดขึ้น หรือถ่ายให้ตรงและสว่างกว่าเดิม');
   }
 }
+
+// ── Text messages ────────────────────────────────────────────────────────────
 
 async function handleTextMessage(event) {
   const { replyToken, source, message } = event;
   const userId = source.userId;
   const text = message.text.trim();
+  const stateObj = userStates.get(userId) ?? {};
 
-  // Reset conversation history
+  // Reset
   if (text === 'รีเซ็ต' || text.toLowerCase() === 'reset') {
-    clearHistory(userId);
-    return replyText(replyToken, '🔄 เริ่มการสนทนาใหม่แล้ว');
-  }
-
-  // Manual receipt entry: "ชำระ 2000 บาท 2026-06-27 ค่าภาษี"
-  const manualMatch = text.match(/ชำระ\s+([\d,]+)\s*บาท\s*(\d{4}-\d{2}-\d{2})?\s*(.*)?/i);
-  if (manualMatch && userStates.get(userId) === 'awaiting_receipt') {
     userStates.delete(userId);
-    const amount = parseFloat(manualMatch[1].replace(/,/g, ''));
-    const date = manualMatch[2] || new Date().toISOString().slice(0, 10);
-    const description = manualMatch[3]?.trim() || 'ป้อนด้วยตัวเอง';
-    const profile = await getUserProfile(userId);
-    await appendPayment({ userId, displayName: profile.displayName, amount, date, description, messageId: null });
-    return replyText(replyToken, `✅ บันทึกแล้ว!\n💰 ฿${formatAmount(amount)} — ${date}\n📝 ${description}`);
+    clearHistory(userId);
+    return reply(replyToken, '🔄 รีเซ็ตแล้ว');
   }
 
-  // Everything else → Thai accounting AI
+  // ── State: waiting for customer name ──
+  if (stateObj.state === 'awaiting_name') {
+    const registeredName = text;
+    const profile = await getUserProfile(userId);
+    await saveCustomerName(userId, profile.displayName, registeredName);
+
+    userStates.set(userId, { state: 'awaiting_receipt' });
+    return reply(replyToken, `✅ บันทึกชื่อ "${registeredName}" แล้วค่ะ\n\n📎 กรุณาส่งรูปภาพใบเสร็จได้เลย`);
+  }
+
+  // ── State: waiting for category selection ──
+  if (stateObj.state === 'awaiting_category') {
+    const categoryMatch = text.match(/^หมวดหมู่:\s*(.+)$/);
+    let category = categoryMatch ? categoryMatch[1].trim() : text.trim();
+
+    if (category === 'อื่นๆ') {
+      userStates.set(userId, { ...stateObj, state: 'awaiting_custom_category' });
+      return reply(replyToken, 'กรุณาพิมพ์หมวดหมู่ที่ต้องการ:');
+    }
+
+    await saveReceipt(userId, category, stateObj.pendingReceipt, replyToken);
+    return;
+  }
+
+  // ── State: waiting for custom category text ──
+  if (stateObj.state === 'awaiting_custom_category') {
+    await saveReceipt(userId, text.trim(), stateObj.pendingReceipt, replyToken);
+    return;
+  }
+
+  // ── Manual receipt entry ──
+  const manualMatch = text.match(/ชำระ\s+([\d,]+)\s*บาท\s*(\d{4}-\d{2}-\d{2})?\s*(.*)?/i);
+  if (manualMatch && stateObj.state === 'awaiting_receipt') {
+    userStates.set(userId, {
+      state: 'awaiting_category',
+      pendingReceipt: {
+        data: {
+          amount: parseFloat(manualMatch[1].replace(/,/g, '')),
+          date: manualMatch[2] || new Date().toISOString().slice(0, 10),
+          description: manualMatch[3]?.trim() || 'ป้อนด้วยตัวเอง',
+          rawText: text,
+        },
+        imageBuffer: null,
+        messageId: null,
+      },
+    });
+
+    return reply(replyToken, [
+      {
+        type: 'text',
+        text: 'กรุณาเลือกหมวดหมู่:',
+        quickReply: categoryQuickReply(),
+      },
+    ]);
+  }
+
+  // ── Default: Thai accounting AI ──
   try {
-    await replyText(replyToken, '🤔 กำลังค้นหาคำตอบ...');
+    await reply(replyToken, '🤔 กำลังค้นหา...');
     const answer = await askAccounting(userId, text);
     await push(userId, answer);
   } catch (err) {
-    console.error('Accounting AI error:', err.message);
-    await push(userId, '❌ ขออภัย เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง');
+    console.error('AI error:', err.message);
+    await push(userId, '❌ เกิดข้อผิดพลาด กรุณาลองใหม่');
   }
 }
+
+// ── Save receipt after category is confirmed ─────────────────────────────────
+
+async function saveReceipt(userId, category, pendingReceipt, replyToken) {
+  userStates.delete(userId);
+
+  const { data, imageBuffer, messageId } = pendingReceipt;
+  const customerName = await getCustomerName(userId);
+
+  let imageUrl = null;
+
+  // Upload image to Google Drive if we have it
+  if (imageBuffer) {
+    try {
+      const safeDate = data.date || new Date().toISOString().slice(0, 10);
+      const safeAmount = data.amount ? `${data.amount}THB` : 'unknown';
+      const filename = `${customerName}_${safeDate}_${safeAmount}_${messageId?.slice(-6) ?? 'manual'}.jpg`;
+      imageUrl = await uploadReceiptImage(imageBuffer, customerName, filename);
+    } catch (err) {
+      console.error('Drive upload error:', err.message);
+    }
+  }
+
+  await appendPayment({
+    userId,
+    customerName,
+    category,
+    amount: data.amount,
+    date: data.date,
+    description: data.description,
+    rawText: data.rawText,
+    imageUrl,
+  });
+
+  const amountStr = data.amount != null ? `฿${formatAmount(data.amount)}` : 'ไม่ระบุ';
+  const imgNote = imageUrl ? `\n🖼 รูปภาพ: ${imageUrl}` : '';
+
+  await push(userId,
+    `✅ บันทึกสำเร็จ!\n\n👤 ${customerName}\n📂 หมวด: ${category}\n💰 ${amountStr}\n📅 ${data.date || 'ไม่ระบุ'}\n📝 ${data.description || 'ไม่ระบุ'}${imgNote}`
+  );
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
 
 async function handleEvent(event) {
   try {
@@ -134,8 +269,8 @@ async function handleEvent(event) {
     if (event.type === 'message' && event.message.type === 'text') return handleTextMessage(event);
     if (event.type === 'follow') {
       const profile = await getUserProfile(event.source.userId);
-      return replyText(event.replyToken,
-        `สวัสดีคุณ ${profile.displayName}! 🙏\n\nฉันคือ TaxBot ผู้ช่วยด้านภาษีและบัญชีไทย\n\n📎 กดปุ่ม "ส่งใบเสร็จ" เพื่อบันทึกการชำระเงิน\n📊 กด "สรุปรายปี" เพื่อดูยอดรวม\n💬 หรือพิมพ์ถามเรื่องภาษีได้เลย เช่น "ค่าลดหย่อนมีอะไรบ้าง"`
+      return reply(event.replyToken,
+        `สวัสดีคุณ ${profile.displayName}! 🙏\n\nฉันคือ TaxBot ผู้ช่วยด้านภาษีและบัญชีไทย\n\n📎 กด "ส่งใบเสร็จ" เพื่อบันทึกการชำระเงิน\n📊 กด "สรุปรายปี" เพื่อดูยอดรวม\n💬 หรือพิมพ์ถามเรื่องภาษีได้เลย`
       );
     }
   } catch (err) {
