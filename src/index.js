@@ -2,26 +2,72 @@ require('dotenv').config();
 
 const express = require('express');
 const line = require('@line/bot-sdk');
+const Groq = require('groq-sdk');
 const { handleEvent } = require('./handlers/messageHandler');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const lineConfig = {
-  channelSecret: process.env.LINE_CHANNEL_SECRET,
-};
+const lineConfig = { channelSecret: process.env.LINE_CHANNEL_SECRET };
 
-// LINE webhook — must use raw body for signature verification
 app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
-  res.sendStatus(200); // Respond immediately; process async
-
+  res.sendStatus(200);
   const events = req.body.events ?? [];
-  await Promise.all(events.map(handleEvent));
+  for (const event of events) {
+    try {
+      await handleEvent(event);
+    } catch (err) {
+      console.error('[webhook] unhandled error:', err.message, err.stack);
+    }
+  }
+});
+
+// Hit this URL to confirm all services are working
+app.get('/status', async (_req, res) => {
+  const results = {};
+
+  // Check env vars
+  results.envVars = {
+    LINE_TOKEN: !!process.env.LINE_CHANNEL_ACCESS_TOKEN,
+    LINE_SECRET: !!process.env.LINE_CHANNEL_SECRET,
+    GROQ_API_KEY: !!process.env.GROQ_API_KEY,
+    SPREADSHEET_ID: !!process.env.SPREADSHEET_ID,
+    GOOGLE_CREDS: !!(process.env.GOOGLE_CREDENTIALS_JSON || process.env.GOOGLE_SERVICE_ACCOUNT_KEY),
+  };
+
+  // Test Groq
+  try {
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const r = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 5,
+    });
+    results.groq = { ok: true, reply: r.choices[0].message.content };
+  } catch (err) {
+    results.groq = { ok: false, error: err.message };
+  }
+
+  // Test Google Sheets
+  try {
+    const { getRecentPaymentsForUser } = require('./services/sheetsService');
+    await getRecentPaymentsForUser('test', 1);
+    results.sheets = { ok: true };
+  } catch (err) {
+    results.sheets = { ok: false, error: err.message };
+  }
+
+  res.json(results);
 });
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
+// Keep-alive ping every 14 min so Render free tier doesn't spin down
+setInterval(() => {
+  const http = require('http');
+  http.get(`http://localhost:${PORT}/health`, () => {}).on('error', () => {});
+}, 14 * 60 * 1000);
+
 app.listen(PORT, () => {
   console.log(`Tax LINE Bot running on port ${PORT}`);
-  console.log(`Webhook URL: https://<your-domain>/webhook`);
 });
