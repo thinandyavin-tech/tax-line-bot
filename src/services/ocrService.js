@@ -163,10 +163,16 @@ async function extractReceiptData(imageBuffer) {
 
 // ── Parse text from a PDF file (bank statement / receipt PDF) ────────────────
 async function extractPdfData(pdfBuffer) {
-  const pdfParse = require('pdf-parse');
-  const data = await pdfParse(pdfBuffer);
+  const { PDFParse } = require('pdf-parse');
+  const parser = new PDFParse({ data: pdfBuffer });
+  let data;
+  try {
+    data = await parser.getText();
+  } finally {
+    await parser.destroy();
+  }
   const rawText = data.text;
-  console.log(`[PDF] pages=${data.numpages}, chars=${rawText.length}`);
+  console.log(`[PDF] pages=${data.total}, chars=${rawText.length}`);
   // Try single receipt first
   const structured = await parseStructured(rawText);
   // Also try statement parsing

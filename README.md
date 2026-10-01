@@ -12,7 +12,7 @@ A Thai-language LINE assistant for capturing receipts, tracking payments in Goog
 
 ## Quick start
 
-The package declares Node.js 18 or newer. Use a currently supported Node.js release.
+Use Node.js 22.3+ (Node.js 24 LTS recommended). The PDF parser also supports Node.js 20.16+, but not Node.js 18 or 21.
 
 ```powershell
 git clone https://github.com/thinandyavin-tech/tax-line-bot.git
@@ -66,6 +66,8 @@ The commands `npm run setup-menu` and `npm run setup-menus` update LINE rich men
 - Evaluate with sample data. Keep credentials and customer records out of Git.
 
 ## Source layout
+
+Run `npm test` to exercise PDF text extraction with a generated receipt and a corrupt file. Tests use the real PDF parser and mock AI requests; no credentials or network access are required.
 
 | Path | Responsibility |
 | --- | --- |
