@@ -3,8 +3,6 @@ const path = require('path');
 const { Readable } = require('stream');
 
 const ROOT_FOLDER_NAME = 'TaxBot - ใบเสร็จลูกค้า';
-// Share the root folder with this email so you can view all receipts
-const OWNER_EMAIL = 'thinandyavin@gmail.com';
 
 function getAuth() {
   if (process.env.GOOGLE_CREDENTIALS_JSON) {
@@ -27,9 +25,10 @@ async function getDriveClient() {
 
 // Find or create a folder by name under a parent
 async function findOrCreateFolder(drive, name, parentId = null) {
+  const escapedName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   const query = parentId
-    ? `name='${name}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`
-    : `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+    ? `name='${escapedName}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`
+    : `name='${escapedName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
 
   const res = await drive.files.list({ q: query, fields: 'files(id, name)', spaces: 'drive' });
 
@@ -42,10 +41,11 @@ async function findOrCreateFolder(drive, name, parentId = null) {
   const folderId = created.data.id;
 
   // Share root folder with owner so they can browse it
-  if (!parentId) {
+  const ownerEmail = process.env.DRIVE_OWNER_EMAIL?.trim();
+  if (!parentId && ownerEmail) {
     await drive.permissions.create({
       fileId: folderId,
-      requestBody: { role: 'writer', type: 'user', emailAddress: OWNER_EMAIL },
+      requestBody: { role: 'writer', type: 'user', emailAddress: ownerEmail },
     }).catch(() => {}); // non-fatal if sharing fails
   }
 
@@ -68,12 +68,7 @@ async function uploadReceiptImage(imageBuffer, customerName, filename) {
     fields: 'id, webViewLink',
   });
 
-  // Make the file viewable by anyone with the link
-  await drive.permissions.create({
-    fileId: file.data.id,
-    requestBody: { role: 'reader', type: 'anyone' },
-  }).catch(() => {});
-
+  // Preserve the parent folder's permissions; never grant public link access.
   return file.data.webViewLink ?? `https://drive.google.com/file/d/${file.data.id}/view`;
 }
 
@@ -90,7 +85,7 @@ async function uploadFile(buffer, customerName, filename, mimeType) {
     fields: 'id, webViewLink',
   });
 
-  // Only this customer can see it via link — we do NOT make it public
+  // Access follows the parent folder's permissions, not the customer's name.
   return file.data.webViewLink ?? `https://drive.google.com/file/d/${file.data.id}/view`;
 }
 

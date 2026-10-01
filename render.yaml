@@ -2,18 +2,18 @@ services:
   - type: web
     name: tax-line-bot
     runtime: node
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     envVars:
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
       - key: LINE_CHANNEL_SECRET
         sync: false
-      - key: GEMINI_API_KEY
+      - key: GROQ_API_KEY
         sync: false
       - key: SPREADSHEET_ID
         sync: false
-      - key: GOOGLE_SERVICE_ACCOUNT_KEY
-        value: ./google-service-account.json
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
       - key: PORT
         value: 3000
