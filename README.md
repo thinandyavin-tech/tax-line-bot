@@ -29,13 +29,14 @@ Fill in your local `.env`:
 | --- | --- |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API token |
 | `LINE_CHANNEL_SECRET` | Webhook signature verification |
-| `GROQ_API_KEY` | OCR fallback, parsing, and chat; add it because the current template omits it |
+| `GROQ_API_KEY` | OCR fallback, receipt parsing, and chat |
 | `SPREADSHEET_ID` | Destination Google spreadsheet |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | Local service-account JSON file path |
 | `GOOGLE_CREDENTIALS_JSON` | Alternative to a key file: service-account JSON in an environment variable |
+| `DRIVE_OWNER_EMAIL` | Optional operator email to share newly created receipt root folders with |
 | `PORT` | Server port, default 3000 |
 
-The template includes `GEMINI_API_KEY`, but the current OCR and assistant services use Groq.
+The template uses Groq, matching the current OCR and assistant services.
 
 Enable the Google Sheets and Drive APIs for your project, plus Cloud Vision for the primary OCR path. Share the destination spreadsheet with the service account as an editor. The app can create customer and payment tabs during use.
 
@@ -55,11 +56,16 @@ The commands `npm run setup-menu` and `npm run setup-menus` update LINE rich men
 
 ## Deployment
 
-[render.yaml](render.yaml) contains a Render service definition. Add `GROQ_API_KEY` and supply Google credentials through `GOOGLE_CREDENTIALS_JSON` or a securely mounted file; the existing blueprint does not fully configure these.
+[render.yaml](render.yaml) installs the locked dependencies and prompts for the LINE credentials, `GROQ_API_KEY`, `SPREADSHEET_ID`, and `GOOGLE_CREDENTIALS_JSON`. Paste the service-account JSON into the hosting environment variable, never into the repository. If an operator needs browser access to new receipt folders, set `DRIVE_OWNER_EMAIL` explicitly in the service environment.
+
+## Receipt storage
+
+New uploads inherit their parent folder's permissions. The bot does not grant anyone-with-the-link access or share folders with a built-in email address. A Drive URL alone does not grant access; use an authorized Google account to open it.
+
+`DRIVE_OWNER_EMAIL` only affects newly created root folders. For an existing folder, review sharing in Google Drive. This update does not revoke permissions on previously uploaded files or change inherited permissions; review old receipts and parent folders before using real customer data. Customer names label folders and are not an access-control boundary.
 
 ## Current limitations
 
-- Receipt-image uploads attempt to grant anyone-with-the-link access. Review [driveService.js](src/services/driveService.js) and its owner-email setting before processing private receipts.
 - Conversation state and temporary downloads are held in memory and are lost on restart.
 - `/status` performs live integration checks and can expose service errors. Restrict access before production use.
 - OCR results and tax estimates need checking against original records.
@@ -67,7 +73,7 @@ The commands `npm run setup-menu` and `npm run setup-menus` update LINE rich men
 
 ## Source layout
 
-Run `npm test` to exercise PDF text extraction with a generated receipt and a corrupt file. Tests use the real PDF parser and mock AI requests; no credentials or network access are required.
+Run `npm test` to exercise PDF text extraction, invalid PDFs, receipt-sharing defaults, and folder lookup with apostrophes and backslashes. Tests use the real PDF parser and mock AI/Drive requests; no credentials or network access are required.
 
 | Path | Responsibility |
 | --- | --- |
